@@ -1,6 +1,6 @@
 /*
 	dldipatch aka dlditool public domain
-	under Creative Commons CC0
+	SPDX-License-Identifier: CC0-1.0
 
 	According to ndsdis2 -NH9 0x00 dldi_startup_patch.o (from NDS_loader build result):
 	:00000040 E3A00001 mov  r0,#0x1 ;r0=1(0x1)
