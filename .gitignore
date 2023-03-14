@@ -1,0 +1,6 @@
+*.dldi
+*.nds
+
+dldipatch*
+!dldipatch.c
+!dldipatch.txt
