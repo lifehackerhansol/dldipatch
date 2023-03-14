@@ -7,3 +7,10 @@ v6.100827 Now dldipatch searches dldi section more precisely. Also you can ignor
 v7.110124 stdout and stderr are switched.
 
 v8.?????? undocumented release provided in xenobox source code
+
+v9.230313 code cleanup. 
+          Remove usage of stdout as dldicaptor destination file. 
+          existing argvs are incremented by 1 and argv[1] is now a parameter that does:
+            - patch: patch dldi
+            - info: get DLDI info of given file
+            - extract: extract DLDI from given homebrew
