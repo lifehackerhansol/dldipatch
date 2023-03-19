@@ -148,7 +148,7 @@ int dldipatch(byte *nds, const int ndslen, const int ignoresize, const byte *pD,
 #define torelative(n) (read32(pD+n)-pDdata)
 
 #define TWICE(e) (e),(e)
-int dldishow(const byte *pD,const int dldilen, bool extract, const char* out){
+int dldishow(const byte *pD, bool extract, const char* out){
 	byte id[5];
 	u32 pDdata, pDbssEnd, fix;
 	int ittr;
@@ -244,12 +244,12 @@ int main(const int argc, const char **argv) {
 
 	// show DLDI info
 	if(strncmp(argv[1], "info", 4) == 0) {
-		dldishow(pd, dldilen, false, NULL);
+		dldishow(pd, false, NULL);
 	}
 
 	// extract DLDI
 	else if(strncmp(argv[1], "extract", 7) == 0) {
-		dldishow(pd, dldilen, true, argv[3]);
+		dldishow(pd, true, argv[3]);
 	}
 
 	// patch DLDI
