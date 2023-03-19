@@ -212,7 +212,7 @@ int main(const int argc, const char **argv) {
 	struct stat st, stdldi;
 	byte *p, *pdldi, *pd = NULL;
 
-	if(argc < 4 && strncmp(argv[1], "info", 4) != 0) {
+	if(argc < 2 || (argc < 4 && strncmp(argv[1], "info", 4) != 0)) {
 		print_help();
 		return 1;
 	}
