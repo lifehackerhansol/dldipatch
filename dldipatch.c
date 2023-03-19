@@ -1,5 +1,10 @@
 /*
 	dldipatch aka dlditool public domain
+
+	Authors:
+	- Xenon++
+	- lifehackerhansol
+
 	SPDX-License-Identifier: CC0-1.0
 
 	According to ndsdis2 -NH9 0x00 dldi_startup_patch.o (from NDS_loader build result):
