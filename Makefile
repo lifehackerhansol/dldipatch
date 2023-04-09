@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: CC0-1.0
 #
-# Copyright (c) 2023, Antonio Niño Díaz
+# SPDX-FileContributor: Antonio Niño Díaz, 2023
 
 dldipatch: dldipatch.c
 	gcc -Wall -Wextra -Wno-sign-compare -Wno-unused-result -std=gnu11 -O3 -o $@ $<
