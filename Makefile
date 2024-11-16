@@ -3,7 +3,7 @@
 # SPDX-FileContributor: Antonio Niño Díaz, 2023
 
 dldipatch: dldipatch.c
-	gcc -Wall -Wextra -Wno-sign-compare -Wno-unused-result -std=gnu11 -O3 -o $@ $<
+	gcc -Wall -Wextra -Wno-unused-result -std=gnu11 -O3 -o $@ $<
 
 .PHONY: clean
 

@@ -1,203 +1,353 @@
-/*
-	dldipatch aka dlditool public domain
-
-	Authors:
-	- Xenon++
-	- lifehackerhansol
-
-	SPDX-License-Identifier: CC0-1.0
-
-	According to ndsdis2 -NH9 0x00 dldi_startup_patch.o (from NDS_loader build result):
-	:00000040 E3A00001 mov  r0,#0x1 ;r0=1(0x1)
-	:00000044 E12FFF1E bx r14 (Jump to addr_00000000?)
-	So the corresponding memory value is "\x01\x00\xa0\xe3\x1e\xff\x2f\xe1" (8 bytes).
-
-*/
+// SPDX-License-Identifier: Zlib
+// SPDX-FileNotice: Modified from the original version by the BlocksDS project.
+// SPDX-FileNotice: Modified from the BlocksDS version to provide a PC version.
+//
+// Copyright (c) 2006 Michael Chisholm (Chishm) and Tim Seidel (Mighty Max).
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <sys/stat.h>
+#include <malloc.h>
+#include <sys/fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
-typedef uint32_t u32;
-typedef unsigned char byte;
+#include "dldi.h"
 
-#define magicString	0x00
-#define dldiVersion	0x0c
-#define driverSize	0x0d
-#define fixSections	0x0e
-#define allocatedSpace	0x0f
-#define friendlyName 0x10
+const u32 DLDI_MAGIC_NUMBER = 0xBF8DA5ED;
 
-#define dataStart	0x40
-#define dataEnd	0x44
-#define glueStart	0x48
-#define glueEnd	0x4c
-#define gotStart	0x50
-#define gotEnd	0x54
-#define bssStart	0x58
-#define bssEnd	0x5c
+void dldiRelocate(DLDI_INTERFACE *io, uint32_t targetAddress)
+{
+    u32 offset;
+    u32 oldStart;
+    u32 oldEnd;
 
-#define ioType	0x60
-#define dldiFeatures	0x64
-#define dldiStartup	0x68
-#define isInserted	0x6c
-#define readSectors	0x70
-#define writeSectors	0x74
-#define clearStatus	0x78
-#define shutdown	0x7c
-#define dldiData	0x80
+    offset = targetAddress - io->dldiStart;
 
-#define fixAll	0x01
-#define fixGlue	0x02
-#define fixGot	0x04
-#define fixBss	0x08
+	printf("Relocation offset = 0x%08X\n", offset);
 
-const byte *dldimagic=(byte*)"\xed\xa5\x8d\xbf Chishm";
+    oldStart = io->dldiStart;
+    oldEnd = io->dldiEnd;
 
-#define torelative(n) (read32(pA+n)-pAdata)
+    // Correct all pointers to the offsets from the location of this interface
+    io->dldiStart = io->dldiStart + offset;
+    io->dldiEnd = io->dldiEnd + offset;
+    io->interworkStart = io->interworkStart + offset;
+    io->interworkEnd = io->interworkEnd + offset;
+    io->gotStart = io->gotStart + offset;
+    io->gotEnd = io->gotEnd + offset;
+    io->bssStart = io->bssStart + offset;
+    io->bssEnd = io->bssEnd + offset;
 
-unsigned int read32(const void *p){
-	const unsigned char *x=(const unsigned char*)p;
-	return x[0]|(x[1]<<8)|(x[2]<<16)|(x[3]<<24);
+    io->ioInterface.startup =
+        io->ioInterface.startup + offset;
+    io->ioInterface.isInserted =
+        io->ioInterface.isInserted + offset;
+    io->ioInterface.readSectors =
+        io->ioInterface.readSectors + offset;
+    io->ioInterface.writeSectors =
+        io->ioInterface.writeSectors + offset;
+    io->ioInterface.clearStatus =
+        io->ioInterface.clearStatus + offset;
+    io->ioInterface.shutdown =
+        io->ioInterface.shutdown + offset;
+
+	u8 *u8_io = (u8*)io;
+
+    // Fix all addresses with in the DLDI
+    if (io->fixSectionsFlags & FIX_ALL)
+    {
+        for (u32 i = 0; i < (io->dldiEnd - io->dldiStart); i++)
+        {
+            if (oldStart <= *(u8_io + i) && *(u8_io + i) < oldEnd)
+                *(u8_io + i) += offset;
+        }
+    }
+
+    // Fix the interworking glue section
+    if (io->fixSectionsFlags & FIX_GLUE)
+    {
+        for (u32 i = io->interworkStart - io->dldiStart; i < (io->interworkEnd - io->interworkStart); i++)
+        {
+            if (oldStart <= *(u8_io + i) && *(u8_io + i) < oldEnd)
+                *(u8_io + i) += offset;
+        }
+    }
+
+    // Fix the global offset table section
+    if (io->fixSectionsFlags & FIX_GOT)
+    {
+        for (u32 i = io->gotStart - io->dldiStart; i < (io->gotEnd - io->gotStart); i++)
+        {
+            if (oldStart <= *(u8_io + i) && *(u8_io + i) < oldEnd)
+                *(u8_io + i) += offset;
+        }
+    }
+
+    // Initialise the BSS to 0
+    if (io->fixSectionsFlags & FIX_BSS)
+        memset((u8_io + (io->bssStart - io->dldiStart)), 0, io->bssEnd - io->bssStart);
 }
 
-void write32(void *p, const unsigned int n){
-	unsigned char *x = (unsigned char*)p;
-	x[0] = n & 0xff, 
-	x[1] = (n >> 8) & 0xff, 
-	x[2] = (n >> 16) & 0xff, 
-	x[3] = (n >> 24) & 0xff;
-}
+DLDI_INTERFACE *dldiLoadFromFile(const char* src_path)
+{
+	DLDI_INTERFACE* src_dldi = NULL;
+	u8 *src_binary = NULL;
 
-int dldipatch(byte *nds, const int ndslen, const int ignoresize, const byte *pD, const int dldilen) {
-	byte *pA=NULL;
-	byte id[5];
-	byte space;
-	u32 reloc, pAdata, pDdata, pDbssEnd, fix;
-	int i, ittr;
+	FILE *src_file = fopen(src_path, "rb");
+	if (src_file == NULL)
+	{
+		printf("Input file does not exist.\n");
+		return NULL;
+	}
+	fseek(src_file, 0, SEEK_END);
+	int size = ftell(src_file);
+	src_binary = (u8*)memalign(4, size);
+	fseek(src_file, 0, SEEK_SET);
+	fread(src_binary, 1, size, src_file);
+	fclose(src_file);
 
-	for(i = 0; i < ndslen - 0x80; i += 4) {
-		if(!memcmp(nds + i, dldimagic, 12) && (read32(nds + i + dldiVersion) & 0xe0f0e0ff) == 1){
-			pA = nds + i;
-			printf("Section 0x%08x: ", i);
-			if(*((u32*)(pD + bssEnd)) - *((u32*)(pD + dataStart)) > 1 << pA[allocatedSpace]){
-				printf("Available %dB, need %dB. ", 1 << pA[allocatedSpace], *((u32*)(pD + bssEnd)) - *((u32*)(pD + dataStart)));
-				if(ignoresize) {
-					printf("searching interrupted.\n");
-					break;
-				}
-				printf("continue searching.\n");
-				pA = NULL;
-				continue;
-			}
-			printf("searching done.\n");
+	// Scan the file in 32-bit increments.
+	// The DLDI *must* be 4-byte aligned, or it isn't actually usable.
+	for (int i = 0; i < size; i += 4)
+	{
+		if (((u32*)src_binary)[i>>2] == DLDI_MAGIC_NUMBER)
+		{
+			u8 *src_binary_dldi_area = src_binary + i;
+			int dldi_size = (1 << src_binary_dldi_area[0xD]);
+
+			// If this is a raw DLDI binary, then the file itself may be smaller
+			// than the reported DLDI size.
+			if (dldi_size > size)
+				dldi_size = size;
+			// However, if we are looking inside a homebrew app, then we may
+			// accidentally go out of bounds of the file.
+			else if ((src_binary_dldi_area + dldi_size) > (src_binary + size))
+				dldi_size = (src_binary + size) - (src_binary_dldi_area);
+
+			// We do want to allocate the whole area here, though.
+			src_dldi = (DLDI_INTERFACE *)memalign(4, (1 << src_binary_dldi_area[0xD]));
+			memset(src_dldi, 0, (1 << src_binary_dldi_area[0xD]));
+
+			// Finally, copy it to our pointer.
+			memcpy(src_dldi, src_binary_dldi_area, dldi_size);
 			break;
 		}
 	}
-	if(!pA) {
-		printf("not found valid dldi section\n");
-		return 1;
+
+	if (src_dldi == NULL)
+	{
+		printf("Input file does not have a DLDI section.\n");
+		if (src_binary != NULL)
+			free(src_binary);
+		return NULL;
 	}
 
-	space = pA[allocatedSpace];
-
-	pAdata = read32(pA + dataStart);
-	if(!pAdata)
-		pAdata = read32(pA + dldiStartup) - dldiData;
-	memcpy(id, pA + ioType, 4);
-	id[4] = 0;
-	printf("Old ID=%s, Interface=0x%08x,\nName=%s\n", id, pAdata, pA + friendlyName);
-	memcpy(id, pD + ioType, 4);
-	id[4] = 0;
-	printf("New ID=%s, Interface=0x%08x,\nName=%s\n", id, pDdata = read32(pD + dataStart), pD + friendlyName);
-	printf("Relocation=0x%08x, Fix=0x%02x\n", reloc = pAdata - pDdata, fix = pD[fixSections]); //pAdata=pDdata+reloc
-	printf("dldiFileSize=0x%04x, dldiMemSize=0x%04x\n", dldilen, *((u32*)(pD + bssEnd)) - *((u32*)(pD + dataStart)));
-
-	memcpy(pA, pD, dldilen);
-	pA[allocatedSpace] = space;
-	for(ittr = dataStart; ittr < ioType; ittr += 4)
-		write32(pA + ittr, read32(pA + ittr) + reloc);
-	for(ittr = dldiStartup; ittr < dldiData; ittr += 4)
-		write32(pA + ittr, read32(pA + ittr) + reloc);
-	pAdata = read32(pA + dataStart);
-	pDbssEnd = read32(pD + bssEnd);
-
-	if(fix & fixAll)
-		for(ittr = torelative(dataStart); ittr < torelative(dataEnd); ittr += 4)
-			if(pDdata <= read32(pA + ittr) && read32(pA + ittr) < pDbssEnd)
-				printf("All  0x%04x: 0x%08x -> 0x%08x\n", ittr, read32(pA + ittr), read32(pA + ittr) + reloc), write32(pA + ittr, read32(pA + ittr) + reloc);
-	if(fix & fixGlue)
-		for(ittr = torelative(glueStart); ittr < torelative(glueEnd); ittr += 4)
-			if(pDdata <= read32(pA + ittr) && read32(pA + ittr) < pDbssEnd)
-				printf("Glue 0x%04x: 0x%08x -> 0x%08x\n", ittr, read32(pA + ittr), read32(pA + ittr) + reloc), write32(pA + ittr, read32(pA + ittr) + reloc);
-	if(fix & fixGot)
-		for(ittr = torelative(gotStart); ittr < torelative(gotEnd); ittr += 4)
-			if(pDdata <= read32(pA + ittr) && read32(pA + ittr) < pDbssEnd)
-				printf("Got  0x%04x: 0x%08x -> 0x%08x\n", ittr, read32(pA + ittr), read32(pA + ittr) + reloc), write32(pA + ittr, read32(pA + ittr) + reloc);
-	if(fix & fixBss)
-		memset(pA + torelative(bssStart), 0, pDbssEnd - read32(pD + bssStart));
-
-	printf("Patched successfully\n");
-	return 0;
+	free(src_binary);
+	return src_dldi;
 }
 
-#undef torelative
-#define torelative(n) (read32(pD+n)-pDdata)
+int dldiPrint(const char* src_path)
+{
+	DLDI_INTERFACE* src_dldi = dldiLoadFromFile(src_path);
 
-#define TWICE(e) (e),(e)
-int dldishow(const byte *pD, bool extract, const char* out){
-	byte id[5];
-	u32 pDdata, pDbssEnd, fix;
-	int ittr;
+	if (src_dldi == NULL)
+	{
+		printf("Failed to load input DLDI.\n");
+		return -EINVAL;
+	}
 
-	pDdata = read32(pD + dataStart);
-	pDbssEnd = read32(pD + bssEnd);
-	memcpy(id, pD + ioType, 4);
-	id[4] = 0;
-	printf("ID=%s, Fix=0x%02x, Features=0x%02x\nName=%s\n\n", id, fix = pD[fixSections], *((u32*)(pD + dldiFeatures)), pD + friendlyName);
-	printf("data = 0x%04x(%d)-0x%04x(%d)\n", 
-		TWICE(*((u32*)(pD + dataStart)) - *((u32*)(pD + dataStart))), TWICE(*((u32*)(pD + dataEnd)) - *((u32*)(pD + dataStart))));
-	printf("glue = 0x%04x(%d)-0x%04x(%d)\n",
-		TWICE(*((u32*)(pD + glueStart)) - *((u32*)(pD + dataStart))), TWICE(*((u32*)(pD + glueEnd)) - *((u32*)(pD + dataStart))));
-	printf("got  = 0x%04x(%d)-0x%04x(%d)\n",
-		TWICE(*((u32*)(pD + gotStart)) - *((u32*)(pD + dataStart))), TWICE(*((u32*)(pD + gotEnd)) - *((u32*)(pD + dataStart))));
-	printf("bss  = 0x%04x(%d)-0x%04x(%d)\n",
-		TWICE(*((u32*)(pD + bssStart)) - *((u32*)(pD + dataStart))), TWICE(*((u32*)(pD + bssEnd)) - *((u32*)(pD + dataStart))));
+	char dldi_ioType[5] = {};
+	memcpy(dldi_ioType, &(src_dldi->ioInterface.ioType), 4);
+	printf(
+		"ID=%s, Fix=0x%02x, Features=0x%08x\nName=%s\n\n",
+		dldi_ioType,
+		src_dldi->fixSectionsFlags,
+		src_dldi->ioInterface.features,
+		src_dldi->friendlyName
+	);
+
+	printf(
+		"data = 0x%04x(%d)-0x%04x(%d)\n", 
+		(u32)(src_dldi->dldiStart) - (u32)src_dldi->dldiStart,
+		(u32)(src_dldi->dldiStart) - (u32)src_dldi->dldiStart,
+		(u32)(src_dldi->dldiEnd) - (u32)src_dldi->dldiStart,
+		(u32)(src_dldi->dldiEnd) - (u32)src_dldi->dldiStart
+	);
+	if (src_dldi->fixSectionsFlags & FIX_GLUE)
+	{
+		printf("glue = 0x%04x(%d)-0x%04x(%d)\n",
+			(u32)(src_dldi->interworkStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->interworkStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->interworkEnd) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->interworkEnd) - (u32)src_dldi->dldiStart
+		);
+	}
+	else
+	{
+		printf("glue = unset\n");
+	}
+	if (src_dldi->fixSectionsFlags & FIX_GOT)
+	{
+		printf(
+			"got  = 0x%04x(%d)-0x%04x(%d)\n",
+			(u32)(src_dldi->gotStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->gotStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->gotEnd) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->gotEnd) - (u32)src_dldi->dldiStart
+		);
+	}
+	else
+	{
+		printf("got  = unset\n");
+	}
+	if (src_dldi->fixSectionsFlags & FIX_BSS)
+	{
+		printf(
+			"bss  = 0x%04x(%d)-0x%04x(%d)\n",
+			(u32)(src_dldi->bssStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->bssStart) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->bssEnd) - (u32)src_dldi->dldiStart,
+			(u32)(src_dldi->bssEnd) - (u32)src_dldi->dldiStart
+		);
+	}
+	else
+	{
+		printf("bss  = unset\n");
+	}
 	printf("\n");
-	printf("dldiStartup  = 0x%04x(%d)\n", TWICE(*((u32*)(pD + dldiStartup)) - *((u32*)(pD + dataStart))));
-	printf("isInserted   = 0x%04x(%d)\n", TWICE(*((u32*)(pD + isInserted)) - *((u32*)(pD + dataStart))));
-	printf("readSectors  = 0x%04x(%d)\n", TWICE(*((u32*)(pD + readSectors)) - *((u32*)(pD + dataStart))));
-	printf("writeSectors = 0x%04x(%d)\n", TWICE(*((u32*)(pD + writeSectors)) - *((u32*)(pD + dataStart))));
-	printf("clearStatus  = 0x%04x(%d)\n", TWICE(*((u32*)(pD + clearStatus)) - *((u32*)(pD + dataStart))));
-	printf("shutdown     = 0x%04x(%d)\n", TWICE(*((u32*)(pD + shutdown)) - *((u32*)(pD + dataStart))));
 
-	if(fix & fixAll)
-		for(ittr = torelative(dataStart); ittr < torelative(dataEnd); ittr += 4)
-			if(pDdata <= read32(pD + ittr) && read32(pD + ittr) < pDbssEnd)
-				printf("All  0x%04x: 0x%08x\n", ittr, torelative(ittr));
-	if(fix & fixGlue)
-		for(ittr = torelative(glueStart); ittr < torelative(glueEnd); ittr += 4)
-			if(pDdata <= read32(pD + ittr) && read32(pD + ittr) < pDbssEnd)
-				printf("Glue 0x%04x: 0x%08x\n", ittr, torelative(ittr));
-	if(fix & fixGot)
-		for(ittr = torelative(gotStart); ittr < torelative(gotEnd); ittr += 4)
-			if(pDdata <= read32(pD + ittr) && read32(pD + ittr) < pDbssEnd)
-				printf("Got  0x%04x: 0x%08x\n", ittr, torelative(ittr));
+	printf(
+		"dldiStartup  = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.startup - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.startup - (u32)src_dldi->dldiStart
+	);
+	printf(
+		"isInserted   = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.isInserted - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.isInserted - (u32)src_dldi->dldiStart
+	);
+	printf(
+		"readSectors  = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.readSectors - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.readSectors - (u32)src_dldi->dldiStart
+	);
+	printf(
+		"writeSectors = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.writeSectors - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.writeSectors - (u32)src_dldi->dldiStart
+	);
+	printf(
+		"clearStatus  = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.clearStatus - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.clearStatus - (u32)src_dldi->dldiStart
+	);
+	printf(
+		"shutdown     = 0x%04x(%d)\n",
+		(u32)src_dldi->ioInterface.shutdown - (u32)src_dldi->dldiStart,
+		(u32)src_dldi->ioInterface.shutdown - (u32)src_dldi->dldiStart
+	);
 
-	if(extract) {
-		FILE* of = fopen(out, "wb");
-		fseek(of, 0, SEEK_SET);
-		fwrite(pD,1,*((u32*)(pD+bssStart))-*((u32*)(pD+dataStart)),of);
-		fclose(of);
-	}
+	free(src_dldi);
 	return 0;
 }
 
-void print_help(void) {
-	printf("dldipatch aka dlditool public domain v8\n\n");
+int dldiExtract(const char* src_path, const char* dst_path)
+{
+	int rc = dldiPrint(src_path);
+	if (rc != 0)
+		return rc;
+
+	printf("\n");
+
+	DLDI_INTERFACE* src_dldi = dldiLoadFromFile(src_path);
+	u32 dldi_size = src_dldi->dldiEnd - src_dldi->dldiStart;
+	FILE *dst_file = fopen(dst_path, "wb");
+	if (dst_file == NULL)
+	{
+		printf("Failed to open output DLDI for writing: %s\n", strerror(errno));
+		return errno;
+	}
+	fwrite(src_dldi, 1, dldi_size, dst_file);
+	fflush(dst_file);
+	fclose(dst_file);
+	free(src_dldi);
+
+	return 0;
+}
+
+int dldiPatch(const char* src_path, const char* dst_path)
+{
+	printf("Old DLDI:\n\n");
+	int rc = dldiPrint(dst_path);
+	if (rc != 0)
+		goto patch_end;
+	printf("\n");
+	printf("New DLDI:\n\n");
+	rc = dldiPrint(src_path);
+	if (rc != 0)
+		goto patch_end;
+
+	printf("\n");
+
+	DLDI_INTERFACE* src_dldi = dldiLoadFromFile(src_path);
+	DLDI_INTERFACE* dst_dldi = dldiLoadFromFile(dst_path);
+	if (dst_dldi == NULL || src_dldi == NULL)
+	{
+		rc = -ENOMEM;
+		goto patch_end;
+	}
+
+	if (src_dldi->driverSize > dst_dldi->allocatedSize)
+	{
+		printf("Not enough space to patch. Input driver size: %d bytes, allocated size %d bytes\n", 1 << src_dldi->driverSize, 1 << dst_dldi->allocatedSize);
+		rc = -EINVAL;
+		goto patch_free;
+	}
+
+	dldiRelocate(src_dldi, dst_dldi->dldiStart);
+	// restore the original allocated driver size.
+	src_dldi->allocatedSize = dst_dldi->allocatedSize;
+
+	FILE* dst_file = fopen(dst_path, "r+b");
+	fseek(dst_file, 0, SEEK_END);
+	int dst_size = ftell(dst_file);
+	fseek(dst_file, 0, SEEK_SET);
+
+	// Scan the file in 32-bit increments.
+	// The DLDI *must* be 4-byte aligned, or it isn't actually usable.
+	for (int i = 0; i < dst_size; i += 4)
+	{
+		u32 dldiMagic = 0;
+		fseek(dst_file, i, SEEK_SET);
+		fread(&dldiMagic, 1, 4, dst_file);
+		if (dldiMagic == DLDI_MAGIC_NUMBER)
+		{
+			fseek(dst_file, i, SEEK_SET);
+			fwrite(src_dldi, 1, 1 << src_dldi->driverSize, dst_file);
+			fflush(dst_file);
+			fclose(dst_file);
+			rc = 0;
+			break;
+		}
+	}
+
+	printf("\n");
+	printf("Patch successful\n");
+
+patch_free:
+	if (src_dldi != NULL)
+		free(src_dldi);
+	if (dst_dldi != NULL)
+		free(dst_dldi);
+
+patch_end:
+	return rc;
+}
+
+void print_help(void)
+{
+	printf("dldipatch\n\n");
 	printf("Patching a homebrew using a DLDI or another homebrew's embedded DLDI:\n");
 	printf("dldipatch patch dldi/homebrew [homebrew...]\n\n");
 	printf("Extracting a DLDI from a homebrew's embedded DLDI:\n");
@@ -206,80 +356,43 @@ void print_help(void) {
 	printf("dldipatch info dldi/homebrew \n\n");
 }
 
-int main(const int argc, const char **argv) {
-	int i, dldisize;
-	FILE *f, *fdldi;
-	struct stat st, stdldi;
-	byte *p, *pdldi, *pd = NULL;
-
-	if(argc < 2 || (argc < 4 && strncmp(argv[1], "info", 4) != 0)) {
+int main(const int argc, const char **argv)
+{
+	if (argc < 2 || (argc < 4 && strncmp(argv[1], "info", 4) != 0))
+	{
 		print_help();
-		return 1;
+		return -EINVAL;
 	}
-	if(!(fdldi = fopen(argv[2], "rb"))) {
-		printf("cannot open %s\n", argv[2]);
-		return 2;
+
+	if (access(argv[2], F_OK) != 0)
+	{
+		printf("Input file does not exist.\n");
+		return -ENOENT;
 	}
-	fstat(fileno(fdldi), &stdldi);
-	dldisize = stdldi.st_size;
-	if(!(pdldi = malloc(dldisize))) {
-		fclose(fdldi);
-		printf("cannot allocate %d bytes for dldi\n", (int)dldisize);
-		return 3;
-	}
-	fread(pdldi, 1, dldisize, fdldi);
-	fclose(fdldi);
-	for(i = 0; i < dldisize - 0x80; i += 4) {
-		if(!memcmp(pdldi + i, dldimagic, 12) && (read32(pdldi + i + dldiVersion) & 0xe0f0e0ff) == 1) {
-			pd = pdldi + i;
-			dldisize -= i;
-			break;
-		}
-	}
-	if(!pd) {
-		printf("the dldi file is invalid\n");
-		return 4;
-	}
-	u32 dldilen = *((u32*)(pd + bssStart)) - *((u32*)(pd + dataStart));
 
 	// show DLDI info
-	if(strncmp(argv[1], "info", 4) == 0) {
-		dldishow(pd, false, NULL);
+	if (strncmp(argv[1], "info", 4) == 0)
+	{
+		return dldiPrint(argv[2]);
 	}
 
 	// extract DLDI
-	else if(strncmp(argv[1], "extract", 7) == 0) {
-		dldishow(pd, true, argv[3]);
+	else if (strncmp(argv[1], "extract", 7) == 0)
+	{
+		return dldiExtract(argv[2], argv[3]);
 	}
 
 	// patch DLDI
-	else if(strncmp(argv[1], "patch", 5) == 0) {
-		for(i = 3; i < argc; i++) {
-			int ignoresize = 0;
-			const char *name = argv[i];
-			if(*name==':') ignoresize = 1, name++;
-			printf("Patching %s...\n", name);
-			if(!(f = fopen(name, "rb+"))) {
-				printf("cannot open %s\n", name);
-				continue;
-			}
-			fstat(fileno(f), &st);
-			if(!(p = malloc(st.st_size))) {
-				printf("cannot allocate %d bytes for %s\n", (int)st.st_size, name);
-				continue;
-			}
-			fread(p, 1, st.st_size, f);
-			rewind(f);
-			if(!dldipatch(p, st.st_size, ignoresize, pd, dldilen))
-				fwrite(p, 1, st.st_size, f);
-			fclose(f);
-			free(p);
-		}
+	else if (strncmp(argv[1], "patch", 5) == 0)
+	{
+		return dldiPatch(argv[2], argv[3]);
 	}
 	// what are you even trying to do
-	else {
+	else
+	{
 		printf("Invalid argument: %s\n", argv[1]);
+		return -EINVAL;
 	}
-	free(pdldi);
+
 	return 0;
 }
