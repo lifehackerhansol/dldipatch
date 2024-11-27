@@ -102,7 +102,7 @@ DLDI_INTERFACE *dldiLoadFromFile(const char* src_path)
 	}
 	fseek(src_file, 0, SEEK_END);
 	int size = ftell(src_file);
-	src_binary = (u8*)memalign(4, size);
+	src_binary = (u8*)malloc(size);
 	fseek(src_file, 0, SEEK_SET);
 	fread(src_binary, 1, size, src_file);
 	fclose(src_file);
@@ -126,7 +126,7 @@ DLDI_INTERFACE *dldiLoadFromFile(const char* src_path)
 				dldi_size = (src_binary + size) - (src_binary_dldi_area);
 
 			// We do want to allocate the whole area here, though.
-			src_dldi = (DLDI_INTERFACE *)memalign(4, (1 << src_binary_dldi_area[0xD]));
+			src_dldi = (DLDI_INTERFACE *)malloc(1 << src_binary_dldi_area[0xD]);
 			memset(src_dldi, 0, (1 << src_binary_dldi_area[0xD]));
 
 			// Finally, copy it to our pointer.
