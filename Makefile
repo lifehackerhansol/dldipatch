@@ -2,7 +2,7 @@
 #
 # SPDX-FileContributor: Antonio Niño Díaz, 2023-2024
 
-HOSTCC		?= gcc
+HOSTCC		?= $(CC)
 
 dldipatch: dldipatch.c
 	$(HOSTCC) -Wall -Wextra -Wno-unused-result -std=gnu11 -O3 -o $@ $<
